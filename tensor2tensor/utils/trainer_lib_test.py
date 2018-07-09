@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Tests for trainer_lib."""
 
 from __future__ import absolute_import
@@ -21,9 +20,6 @@ from __future__ import print_function
 
 import os
 import shutil
-
-# Dependency imports
-
 from tensor2tensor import models  # pylint: disable=unused-import
 from tensor2tensor.data_generators import algorithmic
 from tensor2tensor.data_generators import generator_utils
@@ -37,7 +33,8 @@ import tensorflow as tf
 @registry.register_problem
 class TinyAlgo(algorithmic.AlgorithmicIdentityBinary40):
 
-  def generate_data(self, data_dir, _):
+  def generate_data(self, data_dir, tmp_dir, task_id=-1):
+    del tmp_dir, task_id
     identity_problem = algorithmic.AlgorithmicIdentityBinary40()
     generator_utils.generate_files(
         identity_problem.generator(self.num_symbols, 40, 100000),
@@ -70,18 +67,17 @@ class TrainerLibTest(tf.test.TestCase):
         use_tpu=False)
     run_config = trainer_lib.create_run_config(
         model_dir=self.data_dir, num_gpus=0, use_tpu=False)
-    hparams = registry.hparams("transformer_tiny_tpu")()
+    hparams = registry.hparams("transformer_tiny_tpu")
     exp = exp_fn(run_config, hparams)
     exp.test()
 
   def testModel(self):
     # HParams
-    hparams = trainer_lib.create_hparams("transformer_tiny",
-                                         data_dir=self.data_dir,
-                                         problem_name="tiny_algo")
+    hparams = trainer_lib.create_hparams(
+        "transformer_tiny", data_dir=self.data_dir, problem_name="tiny_algo")
 
     # Dataset
-    problem = hparams.problem_instances[0]
+    problem = hparams.problem
     dataset = problem.dataset(tf.estimator.ModeKeys.TRAIN, self.data_dir)
     dataset = dataset.repeat(None).padded_batch(10, dataset.output_shapes)
     features = dataset.make_one_shot_iterator().get_next()
@@ -101,6 +97,43 @@ class TrainerLibTest(tf.test.TestCase):
       logits_shape[1] = None
       self.assertAllEqual(logits_shape, [10, None, 1, 1, 4])
       self.assertEqual(loss_val.shape, tuple())
+
+  def testMultipleTargetModalities(self):
+    # HParams
+    hparams = trainer_lib.create_hparams(
+        "transformer_tiny", data_dir=self.data_dir, problem_name="tiny_algo")
+    tm = hparams.problem.get_hparams().target_modality
+    hparams.problem.get_hparams().target_modality = {
+        "targets": tm,
+        "A": tm,
+        "B": tm
+    }
+
+    # Dataset
+    problem = hparams.problem
+    dataset = problem.dataset(tf.estimator.ModeKeys.TRAIN, self.data_dir)
+    dataset = dataset.repeat(None).padded_batch(10, dataset.output_shapes)
+    features = dataset.make_one_shot_iterator().get_next()
+    features = problem_lib.standardize_shapes(features)
+    features["A"] = features["B"] = features["targets"]
+
+    # Model
+    model = registry.model("transformer")(hparams, tf.estimator.ModeKeys.TRAIN)
+
+    def body(args, mb=model.body):
+      out = mb(args)
+      return {"targets": out, "A": out, "B": out}
+
+    model.body = body
+
+    logits, losses = model(features)
+
+    self.assertTrue("training" in losses)
+    loss = losses["training"]
+
+    with self.test_session() as sess:
+      sess.run(tf.global_variables_initializer())
+      sess.run([logits, loss])
 
 
 if __name__ == "__main__":

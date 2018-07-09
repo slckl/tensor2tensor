@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """image generation with transformer (attention).
 
 encoder: [Self-Attention, Feed-forward] x n
@@ -25,9 +24,6 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
-
-# Dependency imports
-
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_image_attention as cia
 from tensor2tensor.layers import common_layers
@@ -155,7 +151,7 @@ def image_transformer2d_base():
   # attention type related params
   hparams.add_hparam("enc_attention_type", cia.AttentionType.GLOBAL)
   hparams.add_hparam("dec_attention_type", cia.AttentionType.LOCAL_2D)
-  hparams.add_hparam("block_rastor_scan", False)
+  hparams.add_hparam("block_raster_scan", False)
 
   # multipos attention params
   hparams.add_hparam("q_filter_width", 1)
@@ -169,7 +165,7 @@ def image_transformer2d_base():
 def imagetransformer2d_base():
   hparams = image_transformer2d_base()
   hparams.dec_attention_type = cia.AttentionType.LOCAL_2D
-  hparams.block_rastor_scan = True
+  hparams.block_raster_scan = True
   return hparams
 
 
@@ -329,7 +325,7 @@ def img2img_transformer2d_base():
   hparams.num_encoder_layers = 4
   hparams.num_decoder_layers = 8
   hparams.dec_attention_type = cia.AttentionType.LOCAL_2D
-  hparams.block_rastor_scan = True
+  hparams.block_raster_scan = True
   return hparams
 
 
@@ -382,7 +378,7 @@ def img2img_transformer_base():
   hparams.block_length = 256
   hparams.block_width = 256
   hparams.dec_attention_type = cia.AttentionType.LOCAL_1D
-  hparams.block_rastor_scan = False
+  hparams.block_raster_scan = False
   return hparams
 
 
@@ -453,11 +449,11 @@ def update_hparams_for_tpu(hparams):
 
 
 @registry.register_hparams
-def img2mg_transformer_base_tpu():
+def img2img_transformer_base_tpu():
   """Hparams for training img2img_transformer on tpu."""
   hparams = img2img_transformer_base()
   update_hparams_for_tpu(hparams)
-  hparams.batch_size = 4
+  hparams.batch_size = 2
   hparams.num_heads = 4   # heads are expensive on tpu
   hparams.num_decoder_layers = 8
   hparams.num_encoder_layers = 4
@@ -466,8 +462,8 @@ def img2mg_transformer_base_tpu():
 
 
 @registry.register_hparams
-def img2mg_transformer_tiny_tpu():
-  hparams = img2mg_transformer_base_tpu()
+def img2img_transformer_tiny_tpu():
+  hparams = img2img_transformer_base_tpu()
   hparams.num_hidden_layers = 2
   hparams.hidden_size = 16
   hparams.batch_size = 2
@@ -502,6 +498,7 @@ def img2img_transformer2d_n31():
 
 @registry.register_hparams
 def img2img_transformer2d_n24():
+  """Set of hyperparameters."""
   hparams = img2img_transformer2d_base()
   hparams.batch_size = 1
   hparams.hidden_size = 1024

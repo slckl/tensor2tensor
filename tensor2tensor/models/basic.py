@@ -12,14 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Basic models for testing simple tasks."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-
-# Dependency imports
 
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
@@ -31,13 +28,14 @@ import tensorflow as tf
 
 @registry.register_model
 class BasicFcRelu(t2t_model.T2TModel):
+  """Basic fully-connected + ReLU model."""
 
   def body(self, features):
-    hparams = self._hparams
+    hparams = self.hparams
     x = features["inputs"]
     shape = common_layers.shape_list(x)
     x = tf.reshape(x, [-1, shape[1] * shape[2] * shape[3]])
-    for i in xrange(hparams.num_hidden_layers):
+    for i in range(hparams.num_hidden_layers):
       x = tf.layers.dense(x, hparams.hidden_size, name="layer_%d" % i)
       x = tf.nn.dropout(x, keep_prob=1.0 - hparams.dropout)
       x = tf.nn.relu(x)
