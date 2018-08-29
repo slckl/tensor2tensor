@@ -172,6 +172,15 @@ class Text2TextProblem(problem.Problem):
     """
     return None
 
+  @property
+  def packed_spacing(self):
+    """If this is a packed dataset, how much padding to insert between examples.
+
+    Returns:
+      int
+    """
+    return 0
+
   # END: Subclass interface
 
   @property
@@ -238,6 +247,7 @@ class Text2TextProblem(problem.Problem):
         generator,
         self.has_inputs,
         self.packed_length,
+        spacing=self.packed_spacing,
         chop_long_sequences=not self.has_inputs)
 
   def generate_encoded_samples(self, data_dir, tmp_dir, dataset_split):
@@ -250,13 +260,13 @@ class Text2TextProblem(problem.Problem):
   def max_subtoken_length(self):
     """Maximum subtoken length when generating vocab.
 
-    Override with a finite integer (e.g. 100) to avoid quadratic-time vocab
-    building.
+    SubwordTextEncoder vocabulary building is quadratic-time wrt this variable,
+    setting it to None uses the length of the longest token in the corpus.
 
     Returns:
       an integer or None
     """
-    return None
+    return 200
 
   @property
   def batch_size_means_tokens(self):
@@ -499,6 +509,36 @@ class Text2ClassProblem(Text2TextProblem):
     return (data_fields, data_items_to_decoders)
 
 
+class TextConcat2ClassProblem(Text2ClassProblem):
+  """Base class for text classification problems with multiple inputs.
+
+  For problems where there are multiple input sentences and we wish to concat
+  these inputs with a special delimiter. See, for example, NLI tasks.
+  """
+  CONCAT_TOKEN = "$"
+
+  def generate_text_for_vocab(self, data_dir, tmp_dir):
+    for i, sample in enumerate(
+        self.generate_samples(data_dir, tmp_dir, problem.DatasetSplit.TRAIN)):
+      for inp in sample["inputs"]:
+        yield inp
+        if self.max_samples_for_vocab and (i + 1) >= self.max_samples_for_vocab:
+          break
+
+  def generate_encoded_samples(self, data_dir, tmp_dir, dataset_split):
+    generator = self.generate_samples(data_dir, tmp_dir, dataset_split)
+    encoder = self.get_or_create_vocab(data_dir, tmp_dir)
+    for sample in generator:
+      inputs = []
+      for idx, inp in enumerate(sample["inputs"]):
+        inputs += encoder.encode(inp)
+        inputs.append(text_encoder.EOS_ID)
+        if idx < len(sample["inputs"])-1:
+          inputs.append(encoder.encode(self.CONCAT_TOKEN)[0])
+      label = sample["label"]
+      yield {"inputs": inputs, "targets": [label]}
+
+
 def txt_line_iterator(txt_path):
   """Iterate through lines of file."""
   with tf.gfile.Open(txt_path) as f:
@@ -606,9 +646,77 @@ class Text2textTmpdir(Text2TextProblem):
     del data_dir
     is_training = dataset_split == problem.DatasetSplit.TRAIN
     files = self.TRAIN_FILES if is_training else self.EVAL_FILES
-    files = [os.path.join(tmp_dir, f) for f in files]
+    files = [os.path.join(self._tmp_dir_override or tmp_dir, f) for f in files]
     inputs_file, targets_file = files
     return text2text_txt_iterator(inputs_file, targets_file)
+
+  @property
+  def _tmp_dir_override(self):
+    return None
+
+
+class Text2TextRemotedir(Text2textTmpdir):
+  """Text2TextProblem from files in a remote directory.
+
+  SRC_REMOTE_DIR should be a remote directory, e.g. a GCS bucket (gs://...),
+  that contains the following files, 1 record per line:
+
+    * inputs.train.txt
+    * targets.train.txt
+    * inputs.eval.txt
+    * targets.eval.txt
+
+  """
+  # Override in subclass.
+  SRC_REMOTE_DIR = None
+
+  @property
+  def _tmp_dir_override(self):
+    assert self.SRC_REMOTE_DIR
+    return self.SRC_REMOTE_DIR
+
+
+@registry.register_problem
+class Text2textTmpdirTokens(Text2textTmpdir):
+  """Allows training a token-based variant of Text2textTmpdir.
+
+  Put your training and evaluation data into the following files in tmp_dir,
+  with 1 record per line along with a vocabulary file with 1 token per line
+  (you can leave out PAD, EOS, and UNK as those will be automatically added)
+
+  * inputs.train.txt
+  * targets.train.txt
+  * inputs.eval.txt
+  * targets.eval.txt
+  * vocab.txt
+  """
+
+  @property
+  def vocab_type(self):
+    return VocabType.TOKEN
+
+  @property
+  def oov_token(self):
+    return "<UNK>"
+
+  def _generate_vocab(self, tmp_dir):
+    vocab_list = [self.oov_token]
+    user_vocab_file = os.path.join(tmp_dir, "vocab.txt")
+    with tf.gfile.GFile(user_vocab_file, "r") as vocab_file:
+      for line in vocab_file:
+        token = line.strip()
+        vocab_list.append(token)
+    token_encoder = text_encoder.TokenTextEncoder(None, vocab_list=vocab_list)
+    return token_encoder
+
+  def generate_samples(self, data_dir, tmp_dir, dataset_split):
+    vocab_filepath = os.path.join(data_dir, self.vocab_filename)
+    if not tf.gfile.Exists(vocab_filepath):
+      token_encoder = self._generate_vocab(tmp_dir)
+      token_encoder.store_to_file(vocab_filepath)
+    return super(Text2textTmpdirTokens, self).generate_samples(data_dir,
+                                                               tmp_dir,
+                                                               dataset_split)
 
 
 class ChoppedTextProblem(Text2SelfProblem):

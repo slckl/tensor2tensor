@@ -28,9 +28,8 @@ from tensor2tensor.utils import trainer_lib
 import tensorflow as tf
 
 
-def define_train(hparams, event_dir):
+def define_train(hparams):
   """Define the training setup."""
-  del event_dir
   with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
     memory, collect_summary, initialization\
       = collect.define_collect(
@@ -44,16 +43,18 @@ def define_train(hparams, event_dir):
 def train(hparams, event_dir=None, model_dir=None,
           restore_agent=True, epoch=0):
   """Train."""
-  with tf.name_scope("rl_train"):
-    train_summary_op, _, initialization = define_train(hparams, event_dir)
+  with tf.Graph().as_default():
+    train_summary_op, _, initialization = define_train(hparams)
     if event_dir:
       summary_writer = tf.summary.FileWriter(
           event_dir, graph=tf.get_default_graph(), flush_secs=60)
+    else:
+      summary_writer = None
+
     if model_dir:
       model_saver = tf.train.Saver(
           tf.global_variables(".*network_parameters.*"))
     else:
-      summary_writer = None
       model_saver = None
 
     # TODO(piotrmilos): This should be refactored, possibly with
@@ -69,7 +70,8 @@ def train(hparams, event_dir=None, model_dir=None,
       initialization(sess)
       if env_model_loader:
         trainer_lib.restore_checkpoint(
-            hparams.world_model_dir, env_model_loader, sess, must_restore=True)
+            hparams.world_model_dir, env_model_loader, sess,
+            must_restore=True)
       start_step = 0
       if model_saver and restore_agent:
         start_step = trainer_lib.restore_checkpoint(

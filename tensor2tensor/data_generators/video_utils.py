@@ -46,19 +46,25 @@ def summarize_video_metrics(hook_args):
   current_problem = hook_args.problem
   hparams = hook_args.hparams
   output_dirs = hook_args.output_dirs
+  predictions = hook_args.predictions
   frame_shape = [
       current_problem.frame_height, current_problem.frame_width,
       current_problem.num_channels
   ]
   metrics_graph = tf.Graph()
   with metrics_graph.as_default():
-    metrics_results, _ = video_metrics.compute_video_metrics(
-        output_dirs, problem_name, hparams.video_num_target_frames, frame_shape)
+    if predictions:
+      metrics_results = video_metrics.compute_video_metrics_from_predictions(
+          predictions)
+    else:
+      metrics_results, _ = video_metrics.compute_video_metrics_from_png_files(
+          output_dirs, problem_name,
+          hparams.video_num_target_frames, frame_shape)
 
   summary_values = []
   for name, array in six.iteritems(metrics_results):
     for ind, val in enumerate(array):
-      tag = name + "_" + str(ind)
+      tag = "metric_{}/{}".format(name, ind)
       summary_values.append(tf.Summary.Value(tag=tag, simple_value=val))
   return summary_values
 
@@ -134,6 +140,11 @@ class VideoProblem(problem.Problem):
 
   def preprocess_example(self, example, mode, hparams):
     """Runtime preprocessing, e.g., resize example["frame"]."""
+    if getattr(hparams, "preprocess_resize_frames", None) is not None:
+      example["frame"] = tf.image.resize_images(
+          example["frame"],
+          hparams.preprocess_resize_frames,
+          tf.image.ResizeMethod.BILINEAR)
     return example
 
   @property
@@ -179,7 +190,22 @@ class VideoProblem(problem.Problem):
 
     return data_fields, data_items_to_decoders
 
-  def preprocess(self, dataset, mode, hparams):
+  def serving_input_fn(self, hparams):
+    """For serving/predict, assume that only video frames are provided."""
+    video_input_frames = tf.placeholder(
+        dtype=tf.float32,
+        shape=[
+            None, hparams.video_num_input_frames, self.frame_width,
+            self.frame_height, self.num_channels
+        ])
+
+    # TODO(michalski): add support for passing input_action and input_reward.
+    return tf.estimator.export.ServingInputReceiver(
+        features={"inputs": video_input_frames},
+        receiver_tensors=video_input_frames)
+
+  def preprocess(self, dataset, mode, hparams, interleave=True):
+    del interleave
     def split_on_batch(x):
       """Split x on batch dimension into x[:size, ...] and x[size:, ...]."""
       length = len(x.get_shape())
@@ -212,11 +238,6 @@ class VideoProblem(problem.Problem):
       for k, v in six.iteritems(batched_prefeatures):
         if k == "frame":  # We rename past frames to inputs and targets.
           s1, s2 = split_on_batch(v)
-          # Reshape just to make sure shapes are right and set.
-          s1 = tf.reshape(
-              s1, [hparams.video_num_input_frames] + self.frame_shape)
-          s2 = tf.reshape(
-              s2, [hparams.video_num_target_frames] + self.frame_shape)
           features["inputs"] = s1
           features["targets"] = s2
         else:
@@ -292,7 +313,8 @@ class VideoProblem(problem.Problem):
     else:
       batch_dataset = preprocessed_dataset.apply(
           tf.contrib.data.batch_and_drop_remainder(num_frames))
-    dataset = batch_dataset.map(features_from_batch)  # shuffle(8)
+    dataset = batch_dataset.map(features_from_batch)
+    dataset = dataset.shuffle(hparams.get("shuffle_buffer_size", 128))
     return dataset
 
   def eval_metrics(self):

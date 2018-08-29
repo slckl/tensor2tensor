@@ -97,9 +97,9 @@ class SimulatedBatchEnv(in_graph_batch_env.InGraphBatchEnv):
   flags are held in according variables.
   """
 
-  def __init__(self, environment_spec, length, other_hparams):
+  def __init__(self, environment_spec, length):
     """Batch of environments inside the TensorFlow graph."""
-    del other_hparams
+
     self.length = length
     initial_frames_problem = environment_spec.initial_frames_problem
     self._min_reward = initial_frames_problem.min_reward
@@ -125,7 +125,7 @@ class SimulatedBatchEnv(in_graph_batch_env.InGraphBatchEnv):
                                                FLAGS.data_dir,
                                                shuffle_files=True,
                                                hparams=hparams)
-      dataset = dataset.shuffle(buffer_size=100)
+      dataset = dataset.shuffle(buffer_size=1000)
     else:
       dataset = initial_frames_problem.dataset(tf.estimator.ModeKeys.TRAIN,
                                                FLAGS.data_dir,
@@ -203,4 +203,4 @@ class SimulatedBatchEnv(in_graph_batch_env.InGraphBatchEnv):
   @property
   def observ(self):
     """Access the variable holding the current observation."""
-    return tf.identity(self._observ)
+    return self._observ.read_value()

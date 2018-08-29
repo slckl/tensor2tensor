@@ -38,6 +38,7 @@ from tensor2tensor.utils import t2t_model
 
 import tensorflow as tf
 
+from tensorflow.python.ops import inplace_ops
 from tensorflow.python.util import nest
 
 
@@ -53,8 +54,8 @@ class Transformer(t2t_model.T2TModel):
     """Encode transformer inputs.
 
     Args:
-      inputs: Transformer inputs [batch_size, input_length, input_height,
-        hidden_dim] which will be flattened along the two spatial dimensions.
+      inputs: Transformer inputs [batch_size, input_length, 1, hidden_dim] which
+        will be flattened along the two spatial dimensions.
       target_space: scalar, target space ID.
       hparams: hyperparameters for model.
       features: optionally pass the entire features dictionary as well.
@@ -134,7 +135,7 @@ class Transformer(t2t_model.T2TModel):
         save_weights_to=self.attention_weights,
         losses=losses)
 
-    if (common_layers.is_on_tpu() and
+    if (common_layers.is_xla_compiled() and
         hparams.mode == tf.estimator.ModeKeys.TRAIN):
       # TPU does not react kindly to extra dimensions.
       # TODO(noam): remove this once TPU is more forgiving of extra dims.
@@ -148,9 +149,10 @@ class Transformer(t2t_model.T2TModel):
 
     Args:
       features: Map of features to the model. Should contain the following:
-          "inputs": Transformer inputs [batch_size, input_length, hidden_dim]
+          "inputs": Transformer inputs.
+              [batch_size, input_length, 1, hidden_dim].
           "targets": Target decoder outputs.
-              [batch_size, decoder_length, hidden_dim]
+              [batch_size, decoder_length, 1, hidden_dim]
           "target_space_id": A scalar int from data_generators.problem.SpaceID.
 
     Returns:
@@ -171,10 +173,8 @@ class Transformer(t2t_model.T2TModel):
     targets = features["targets"]
     targets_shape = common_layers.shape_list(targets)
     targets = common_layers.flatten4d3d(targets)
-
     decoder_input, decoder_self_attention_bias = transformer_prepare_decoder(
         targets, hparams, features=features)
-
     decoder_output = self.decode(
         decoder_input,
         encoder_output,
@@ -412,20 +412,6 @@ class Transformer(t2t_model.T2TModel):
       bias_shape = decoder_self_attention_bias.shape.as_list()
       bias = tf.slice(decoder_self_attention_bias, [0, 0, i, 0],
                       [bias_shape[0], bias_shape[1], 1, bias_shape[3]])
-
-      bias_padding = tf.fill([bias_shape[0], bias_shape[1], 1], -1e9)
-      tmp_bias = tf.transpose(bias, perm=[3, 0, 1, 2])
-      bias_index = i + 1
-      while_condition = lambda bias_index, _: tf.less(bias_index, decode_length)
-
-      def while_body(bias_index, tmp_bias):
-        tmp_bias = common_layers.tf_inplace_ops().alias_inplace_update(
-            tmp_bias, bias_index, bias_padding)
-        return bias_index + 1, tmp_bias
-
-      _, tmp_bias = tf.while_loop(
-          while_condition, while_body, (bias_index, tmp_bias))
-      bias = tf.transpose(tmp_bias, perm=[1, 2, 3, 0])
 
       with tf.variable_scope("body"):
         body_outputs = dp(
@@ -678,9 +664,11 @@ def fast_decode_tpu(encoder_output,
                     hparams,
                     decode_length,
                     beam_size=1,
+                    sos_id=0,
                     eos_id=beam_search.EOS_ID,
                     batch_size=None,
-                    force_decode_length=False):
+                    force_decode_length=False,
+                    scope_prefix="body/"):
   """Given encoder output and a symbols to logits function, does fast decoding.
 
   Implements only greedy decoding for TPU.
@@ -694,10 +682,12 @@ def fast_decode_tpu(encoder_output,
     hparams: Run hyperparameters.
     decode_length: An integer, how many additional timesteps to decode.
     beam_size: An integer, number of beams.
+    sos_id: Start-of-sequence symbol.
     eos_id: End-of-sequence symbol.
     batch_size: An integer, must be passed if there is no input.
     force_decode_length: A bool, whether to force the full decode length, or if
         False, stop when all beams hit eos_id.
+    scope_prefix: str, prefix for decoder layer variable scopes.
 
   Returns:
       A dict of decoding results {
@@ -736,7 +726,8 @@ def fast_decode_tpu(encoder_output,
     for layer in range(num_layers):
       layer_name = "layer_%d" % layer
       with tf.variable_scope(
-          "body/decoder/%s/encdec_attention/multihead_attention" % layer_name):
+          "%sdecoder/%s/encdec_attention/multihead_attention" % (scope_prefix,
+                                                                 layer_name)):
         k_encdec = common_attention.compute_attention_component(
             encoder_output, key_channels, name="k")
         k_encdec = common_attention.split_heads(k_encdec, hparams.num_heads)
@@ -768,7 +759,7 @@ def fast_decode_tpu(encoder_output,
 
     next_id = tf.expand_dims(next_id, axis=1)
     decoded_ids = tf.transpose(decoded_ids)
-    decoded_ids = common_layers.tf_inplace_ops().alias_inplace_update(
+    decoded_ids = inplace_ops.alias_inplace_update(
         decoded_ids, i, tf.squeeze(next_id, axis=1))
     decoded_ids = tf.transpose(decoded_ids)
     return i + 1, hit_eos, next_id, decoded_ids, cache, log_prob
@@ -781,7 +772,7 @@ def fast_decode_tpu(encoder_output,
 
   decoded_ids = tf.zeros([batch_size, decode_length], dtype=tf.int64)
   hit_eos = tf.fill([batch_size], False)
-  next_id = tf.zeros([batch_size, 1], dtype=tf.int64)
+  next_id = sos_id * tf.ones([batch_size, 1], dtype=tf.int64)
   initial_log_prob = tf.zeros([batch_size], dtype=tf.float32)
 
   def compute_cache_shape_invariants(tensor):
@@ -815,9 +806,11 @@ def fast_decode(encoder_output,
                 beam_size=1,
                 top_beams=1,
                 alpha=1.0,
+                sos_id=0,
                 eos_id=beam_search.EOS_ID,
                 batch_size=None,
-                force_decode_length=False):
+                force_decode_length=False,
+                scope_prefix="body/"):
   """Given encoder output and a symbols to logits function, does fast decoding.
 
   Implements both greedy and beam search decoding, uses beam search iff
@@ -836,10 +829,12 @@ def fast_decode(encoder_output,
     top_beams: an integer. How many of the beams to return.
     alpha: Float that controls the length penalty. larger the alpha, stronger
       the preference for longer translations.
+    sos_id: End-of-sequence symbol in beam search.
     eos_id: End-of-sequence symbol in beam search.
     batch_size: an integer scalar - must be passed if there is no input
     force_decode_length: bool, whether to force the full decode length, or if
       False, stop when all beams hit eos_id.
+    scope_prefix: str, prefix for decoder layer variable scopes.
 
   Returns:
       A dict of decoding results {
@@ -879,7 +874,8 @@ def fast_decode(encoder_output,
     for layer in range(num_layers):
       layer_name = "layer_%d" % layer
       with tf.variable_scope(
-          "body/decoder/%s/encdec_attention/multihead_attention" % layer_name):
+          "%sdecoder/%s/encdec_attention/multihead_attention" % (scope_prefix,
+                                                                 layer_name)):
         k_encdec = common_attention.compute_attention_component(
             encoder_output, key_channels, name="k",
             vars_3d_num_heads=vars_3d_num_heads)
@@ -895,7 +891,7 @@ def fast_decode(encoder_output,
     cache["encoder_decoder_attention_bias"] = encoder_decoder_attention_bias
 
   if beam_size > 1:  # Beam Search
-    initial_ids = tf.zeros([batch_size], dtype=tf.int32)
+    initial_ids = sos_id * tf.ones([batch_size], dtype=tf.int32)
     decoded_ids, scores = beam_search.beam_search(
         symbols_to_logits_fn,
         initial_ids,
@@ -940,7 +936,7 @@ def fast_decode(encoder_output,
 
     decoded_ids = tf.zeros([batch_size, 0], dtype=tf.int64)
     hit_eos = tf.fill([batch_size], False)
-    next_id = tf.zeros([batch_size, 1], dtype=tf.int64)
+    next_id = sos_id * tf.ones([batch_size, 1], dtype=tf.int64)
     initial_log_prob = tf.zeros([batch_size], dtype=tf.float32)
     _, _, _, decoded_ids, _, log_prob = tf.while_loop(
         is_not_finished,
@@ -1210,7 +1206,7 @@ def transformer_encoder(encoder_input,
           encoder_self_attention_bias)
       nonpadding = 1.0 - padding
     pad_remover = None
-    if hparams.use_pad_remover and not common_layers.is_on_tpu():
+    if hparams.use_pad_remover and not common_layers.is_xla_compiled():
       pad_remover = expert_utils.PadRemover(padding)
     for layer in range(hparams.num_encoder_layers or hparams.num_hidden_layers):
       with tf.variable_scope("layer_%d" % layer):
@@ -1455,10 +1451,19 @@ def transformer_ffn_layer(x,
         hparams.moe_num_experts,
         overhead=overhead,
         loss_coef=hparams.moe_loss_coef)
-    if losses is None:
-      raise ValueError(
-          "transformer_ffn_layer with type local_moe_tpu must pass in "
-          "a losses list")
+  elif ffn_layer == "local_moe":
+    overhead = (
+        hparams.moe_overhead_train
+        if hparams.mode == tf.estimator.ModeKeys.TRAIN else
+        hparams.moe_overhead_eval)
+    ret, loss = expert_utils.local_moe(
+        x,
+        True,
+        expert_utils.ffn_expert_fn(hparams.hidden_size, [hparams.filter_size],
+                                   hparams.hidden_size),
+        hparams.moe_num_experts,
+        k=hparams.moe_k,
+        hparams=hparams)
     losses.append(loss)
     return ret
   else:
@@ -1538,6 +1543,109 @@ def transformer_base_v2():
   hparams.relu_dropout = 0.1
   hparams.learning_rate_warmup_steps = 8000
   hparams.learning_rate = 0.2
+  return hparams
+
+
+@registry.register_hparams
+def transformer_base_vq_ada_32ex_packed():
+  """Set of hyperparameters for lm1b packed following tpu params."""
+  hparams = transformer_base_v2()
+  expert_utils.update_hparams_for_vq_gating(hparams)
+  hparams.moe_num_experts = 32
+  hparams.gating_type = "vq"
+  # this gives us a batch size of 16 because each seq is len 256
+  hparams.batch_size = 5072
+  hparams.ffn_layer = "local_moe"
+  hparams.shared_embedding_and_softmax_weights = False
+  hparams.learning_rate_warmup_steps = 10000
+  # one epoch for languagemodel_lm1b32k_packed = 27200 steps w/ bsize 128
+  hparams.learning_rate_decay_steps = 27200
+  hparams.num_heads = 4
+  hparams.num_blocks = 1
+  hparams.moe_k = 1
+  hparams.num_decoder_layers = 6
+  hparams.label_smoothing = 0.
+  hparams.layer_prepostprocess_dropout = 0.1
+  hparams.layer_postprocess_sequence = "dan"
+  hparams.layer_preprocess_sequence = "none"
+  hparams.weight_decay = 1e-06
+  hparams.attention_dropout = 0.1
+  hparams.optimizer = "Adafactor"
+  hparams.learning_rate_schedule = "linear_warmup*rsqrt_decay*linear_decay"
+  hparams.activation_dtype = "float32"
+  hparams.learning_rate = 0.1
+  hparams.learning_rate_constant = 1.0
+  return hparams
+
+
+@registry.register_hparams
+def transformer_topk_16_packed():
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.gating_type = "topk"
+  hparams.moe_num_experts = 16
+  hparams.moe_k = 2
+  return hparams
+
+
+@registry.register_hparams
+def transformer_base_vq1_16_nb1_packed_nda_b01_scales():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.use_scales = int(True)
+  hparams.moe_num_experts = 16
+  hparams.moe_k = 1
+  hparams.beta = 0.1
+  hparams.layer_preprocess_sequence = "n"
+  hparams.layer_postprocess_sequence = "da"
+  hparams.ema = False
+  return hparams
+
+
+@registry.register_hparams
+def transformer_base_vq1_16_nb1_packed_dan_b01_scales():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.use_scales = int(True)
+  hparams.moe_num_experts = 16
+  hparams.moe_k = 1
+  hparams.beta = 0.1
+  hparams.ema = False
+  return hparams
+
+
+@registry.register_hparams
+def transformer_base_vq1_16_nb1_packed_nda_b01_scales_dialog():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq1_16_nb1_packed_nda_b01_scales()
+  hparams.batch_size = 2048
+  hparams.max_length = 1024
+  hparams.filter_size = 3072
+  return hparams
+
+
+@registry.register_hparams
+def transformer_ada_lmpackedbase():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.ffn_layer = "dense_relu_dense"
+  return hparams
+
+
+@registry.register_hparams
+def transformer_ada_lmpackedbase_dialog():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.max_length = 1024
+  hparams.ffn_layer = "dense_relu_dense"
+  hparams.batch_size = 4096
+  return hparams
+
+
+@registry.register_hparams
+def transformer_ada_lmpackedbase_relative():
+  """Set of hyperparameters."""
+  hparams = transformer_base_vq_ada_32ex_packed()
+  hparams.ffn_layer = "dense_relu_dense"
   return hparams
 
 
@@ -1953,6 +2061,15 @@ def transformer_tpu():
   """HParams for Transformer model on TPU."""
   hparams = transformer_base()
   update_hparams_for_tpu(hparams)
+  return hparams
+
+
+@registry.register_hparams
+def transformer_timeseries_tpu():
+  """HParams for running Transformer model on timeseries on TPU."""
+  hparams = transformer_timeseries()
+  update_hparams_for_tpu(hparams)
+  hparams.batch_size = 256  # revert to value set in transformer_timeseries
   return hparams
 
 

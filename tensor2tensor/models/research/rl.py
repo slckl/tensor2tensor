@@ -50,7 +50,6 @@ def ppo_base_v1():
   hparams.add_hparam("save_models_every_epochs", 30)
   hparams.add_hparam("optimization_batch_size", 50)
   hparams.add_hparam("max_gradients_norm", 0.5)
-  hparams.add_hparam("simulated_environment", False)
   hparams.add_hparam("simulation_random_starts", False)
   hparams.add_hparam("intrinsic_reward_scale", 0.)
   return hparams
@@ -113,7 +112,7 @@ def ppo_pong_base():
   hparams.gae_lambda = 0.985
   hparams.entropy_loss_coef = 0.003
   hparams.value_loss_coef = 1
-  hparams.optimization_epochs = 2
+  hparams.optimization_epochs = 3
   hparams.epochs_num = 1000
   hparams.num_eval_agents = 1
   hparams.policy_network = feed_forward_cnn_small_categorical_fun
@@ -131,7 +130,7 @@ def simple_gym_spec(env):
     env_lambda = lambda: gym.make(env)
   if callable(env):
     env_lambda = env
-  assert env is not None, "Unknown specification of environment"
+  assert env_lambda is not None, "Unknown specification of environment"
 
   return tf.contrib.training.HParams(env_lambda=env_lambda,
                                      wrappers=standard_wrappers,

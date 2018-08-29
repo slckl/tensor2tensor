@@ -21,7 +21,7 @@ from __future__ import print_function
 import os
 import shutil
 
-from tensor2tensor.data_generators import gym_problems
+from tensor2tensor.data_generators import gym_problems_specs
 
 import tensorflow as tf
 
@@ -34,9 +34,10 @@ class GymProblemsTest(tf.test.TestCase):
     shutil.rmtree(cls.tmp_dir)
     os.mkdir(cls.tmp_dir)
 
-  def testGymAtariBoots(self):
-    problem = gym_problems.GymPongRandom()
-    self.assertEqual(210, problem.frame_height)
+  def testGymAtariGameModes(self):
+    for mode in gym_problems_specs.ATARI_GAME_MODES:
+      problem = gym_problems_specs.ATARI_PROBLEMS["pong"][mode]["base"]()
+      self.assertEqual(210, problem.frame_height)
 
 
 if __name__ == "__main__":
